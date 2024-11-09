@@ -19,8 +19,7 @@ async def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 # Load the secret key from the environment variables
-SECRET_KEY = os.getenv("SECRET_KEY")
-
+SECRET_KEY = "I_am_Admin"
 # Define a Pydantic model to validate the request body
 class ChatRequest(BaseModel):
     user_input: str
