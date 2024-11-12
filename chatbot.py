@@ -1,10 +1,12 @@
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 from langchain.prompts import ChatPromptTemplate
-from langchain.memory import ConversationBufferMemory
 from langchain.chains import LLMChain
 import os
 from dotenv import load_dotenv
+from pymongo import MongoClient
+from datetime import datetime
+import uuid
 
 # Load environment variables
 load_dotenv()
@@ -14,19 +16,60 @@ openai_key = os.getenv("OPENAI_API_KEY")
 chat = ChatOpenAI(api_key=openai_key, model="gpt-4")
 parser = StrOutputParser()
 
-# Initialize memory to store chat history
-memory = ConversationBufferMemory(memory_key="chat_history")
+# MongoDB configuration
+mongo_client = MongoClient(os.getenv("MONGO_URI"))
+db = mongo_client['chat_history_db']
+collection = db['user_chat']
 
-# Function to handle chat queries with memory
-async def handle_chat_query(user_input):
-    # Define the template to guide the model's response with memory
+# Function to initialize a new session if it does not exist
+def initialize_session(session_id):
+    if not collection.find_one({"session_id": session_id}):
+        session_data = {
+            "session_id": session_id,
+            "created_at": datetime.now(),
+            "chat_history": []
+        }
+        collection.insert_one(session_data)
+
+# Function to update chat history in MongoDB for a specific session
+def update_chat_history(session_id, user_input, response):
+    collection.update_one(
+        {"session_id": session_id},
+        {
+            "$push": {
+                "chat_history": {
+                    "timestamp": datetime.now(),
+                    "user_input": user_input,
+                    "response": response
+                }
+            }
+        }
+    )
+
+# Function to retrieve chat history for a specific session
+def get_chat_history(session_id):
+    session = collection.find_one({"session_id": session_id})
+    if session and "chat_history" in session:
+        return "\n".join([f"User: {entry['user_input']}\nBot: {entry['response']}" 
+                          for entry in session["chat_history"]])
+    return ""
+
+# Function to handle chat queries with MongoDB persistence
+async def handle_chat_query(session_id, user_input):
+    # Initialize session if it doesn't already exist
+    initialize_session(session_id)
+    
+    # Retrieve the existing chat history for context
+    chat_history = get_chat_history(session_id)
+    
+    # Define the template to guide the model's response with the retrieved chat history
     template = f"""
     You are an AI real estate assistant named "DarFind". Your expertise is strictly limited to real estate topics in UAE.
     Avoid content that violates copyrights. For questions not related to real estate, give a reminder that you are an AI real estate assistant.
     
     Keep the chat context in mind based on the previous conversation history.
 
-    Chat History: {{chat_history}}
+    Chat History: {chat_history}
 
     Current Input: {{input}}
 
@@ -43,18 +86,20 @@ async def handle_chat_query(user_input):
     The input is {{input}}. Please respond accordingly.
     """
     
-    # Create the prompt using the template and memory
+    # Create the prompt using the template
     prompt = ChatPromptTemplate.from_template(template)
     
-    # Create a chain to process the input, incorporating memory and parser
+    # Create a chain to process the input, using OpenAI's model and the prompt template
     chain = LLMChain(
         llm=chat,
         prompt=prompt,
-        memory=memory,
         output_parser=parser
     )
     
-    # Invoke the chain to get a response and maintain chat history
+    # Invoke the chain to get a response
     response = await chain.acall({"input": user_input})
     
-    return response
+    # Update MongoDB with the latest chat entry
+    update_chat_history(session_id, user_input, response['text'])
+    
+    return response['text']
